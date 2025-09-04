@@ -1,0 +1,1573 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rastro de Manos Optimizado</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+
+        .controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 10px;
+            color: white;
+            z-index: 20;
+            min-width: 180px;
+        }
+
+        .btn {
+            background: #ff6b6b;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            margin: 3px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .btn.active {
+            background: #4ecdc4;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        .status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 18px;
+            text-align: center;
+            z-index: 30;
+        }
+
+        .control-group {
+            margin-bottom: 12px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: bold;
+            font-size: 13px;
+        }
+
+        #colorPicker {
+            width: 100%;
+            height: 35px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+<body>
+    <div class="container">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label>Dedo:</label>
+                <button class="btn finger-btn active" data-finger="index">👈 Índice</button>
+                <button class="btn finger-btn" data-finger="middle">🖕 Medio</button>
+                <button class="btn finger-btn" data-finger="thumb">👍 Pulgar</button>
+            </div>
+            
+            <div class="control-group">
+                <label>Color:</label>
+                <input type="color" id="colorPicker" value="#ff6b6b">
+            </div>
+            
+            <div class="control-group">
+                <label>Duración:</label>
+                <button class="btn duration-btn active" data-duration="2000">2s</button>
+                <button class="btn duration-btn" data-duration="4000">4s</button>
+                <button class="btn duration-btn" data-duration="6000">6s</button>
+                <button class="btn duration-btn" data-duration="10000">10s</button>
+            </div>
+            
+            <div class="control-group">
+                <button class="btn" id="clearBtn">🗑️ Limpiar</button>
+            </div>
+        </div>
+        
+        <div class="status" id="status">Cargando...</div>
+    </div>
+
+    <!-- MediaPipe Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+    <script>
+        // ===== CONFIGURACIÓN =====
+        const CONFIG = {
+            mediapipe: {
+                maxNumHands: 2,
+                modelComplexity: 0,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.5
+            },
+            
+            camera: {
+                width: 480,
+                height: 360,
+                facingMode: 'user'
+            },
+            
+            trail: {
+                maxPoints: 50,
+                duration: 2000,
+                width: 6
+            },
+            
+            fingerLandmarks: {
+                thumb: {
+                    tip: 4,
+                    joints: [3, 2, 1],
+                    base: 1
+                },
+                index: {
+                    tip: 8,
+                    joints: [7, 6, 5],
+                    base: 5
+                },
+                middle: {
+                    tip: 12,
+                    joints: [11, 10, 9],
+                    base: 9
+                }
+            }
+            }
+        };
+
+        // ===== APLICACIÓN PRINCIPAL =====
+        class OptimizedTrailApp {
+            constructor() {
+                this.video = document.getElementById('video');
+                this.canvas = document.getElementById('canvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.status = document.getElementById('status');
+                this.colorPicker = document.getElementById('colorPicker');
+                
+                this.trails = new Map();
+                this.particles = new Map();
+                this.currentFinger = 'index';
+                this.currentColor = '#ff6b6b';
+                this.trailDuration = 2000;
+                this.lastFingerPositions = new Map();
+                this.stillCounters = new Map();
+                this.lastDetectionTimes = new Map();
+                this.detectionHistories = new Map();
+                
+                this.lastProcessTime = 0;
+                this.processInterval = 16;
+                
+                this.init();
+            }
+
+            async init() {
+                try {
+                    this.setupCanvas();
+                    this.setupControls();
+                    await this.setupCamera();
+                    await this.setupHandDetection();
+                    this.startRenderLoop();
+                    
+                    this.status.style.display = 'none';
+                    console.log('✅ App iniciada correctamente');
+                } catch (error) {
+                    console.error('❌ Error:', error);
+                    this.status.textContent = 'Error: ' + error.message;
+                }
+            }
+
+            setupCanvas() {
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+                
+                this.ctx.lineCap = 'round';
+                this.ctx.lineJoin = 'round';
+                
+                window.addEventListener('resize', () => {
+                    this.canvas.width = window.innerWidth;
+                    this.canvas.height = window.innerHeight;
+                });
+            }
+
+            setupControls() {
+                document.querySelectorAll('.finger-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        document.querySelectorAll('.finger-btn').forEach(b => 
+                            b.classList.remove('active')
+                        );
+                        btn.classList.add('active');
+                        this.currentFinger = btn.dataset.finger;
+                    });
+                });
+                
+                document.querySelectorAll('.duration-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        document.querySelectorAll('.duration-btn').forEach(b => 
+                            b.classList.remove('active')
+                        );
+                        btn.classList.add('active');
+                        this.trailDuration = parseInt(btn.dataset.duration);
+                        console.log('⏱️ Duración cambiada a:', this.trailDuration / 1000 + 's');
+                    });
+                });
+                
+                this.colorPicker.addEventListener('change', (e) => {
+                    this.currentColor = e.target.value;
+                });
+                
+                document.getElementById('clearBtn').addEventListener('click', () => {
+                    this.trail = [];
+                    this.particles = [];
+                    this.lastFingerPosition = null;
+                    this.detectionHistory = [];
+                });
+            }
+
+            async setupCamera() {
+                this.status.textContent = 'Accediendo a cámara...';
+                
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: CONFIG.camera
+                });
+                
+                this.video.srcObject = stream;
+                
+                return new Promise((resolve) => {
+                    this.video.onloadedmetadata = resolve;
+                });
+            }
+
+            async setupHandDetection() {
+                this.status.textContent = 'Cargando detección...';
+                
+                this.hands = new Hands({
+                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+                });
+
+                this.hands.setOptions(CONFIG.mediapipe);
+                this.hands.onResults((results) => this.onResults(results));
+
+                this.camera = new Camera(this.video, {
+                    onFrame: async () => {
+                        // Throttling para mejor rendimiento
+                        const now = Date.now();
+                        if (now - this.lastProcessTime >= this.processInterval) {
+                            await this.hands.send({ image: this.video });
+                            this.lastProcessTime = now;
+                        }
+                    },
+                    width: CONFIG.camera.width,
+                    height: CONFIG.camera.height
+                });
+
+                await this.camera.start();
+            }
+
+            onResults(results) {
+                const now = Date.now();
+                
+                // Resetear flags de manos detectadas
+                const currentlyDetectedHands = new Set();
+                
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    // Debug: Log número de manos detectadas
+                    console.log(`🖐️ Detectadas ${results.multiHandLandmarks.length} mano(s)`);
+                    
+                    // Procesar cada mano detectada
+                    for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                        const landmarks = results.multiHandLandmarks[i];
+                        const handedness = results.multiHandedness[i];
+                        const handLabel = handedness.label; // "Left" o "Right"
+                        
+                        console.log(`   └─ Procesando mano ${handLabel}`);
+                        currentlyDetectedHands.add(handLabel);
+                        this.processHandFinger(landmarks, handLabel, now);
+                    }
+                } else {
+                    // Si no hay manos detectadas, actualizar todos los historiales
+                    this.detectionHistories.forEach((history, handLabel) => {
+                        this.updateDetectionHistoryForHand(handLabel, null, now);
+                    });
+                }
+                
+                // Actualizar historiales de manos no detectadas actualmente
+                this.detectionHistories.forEach((history, handLabel) => {
+                    if (!currentlyDetectedHands.has(handLabel)) {
+                        this.updateDetectionHistoryForHand(handLabel, null, now);
+                    }
+                });
+                
+                // Debug: Mostrar estado de trails
+                if (this.trails.size > 0) {
+                    console.log(`📏 Trails activos: ${Array.from(this.trails.keys()).join(', ')}`);
+                }
+            }
+
+            // Nueva función: Verificar continuidad temporal para una mano específica
+            hasTemporalContinuityForHand(handLabel, x, y, timestamp) {
+                const history = this.detectionHistories.get(handLabel) || [];
+                if (history.length === 0) return false;
+                
+                // Buscar la detección más reciente dentro de un tiempo límite
+                const timeLimit = 150; // 150ms de tolerancia
+                const recentDetections = history.filter(detection => 
+                    detection && (timestamp - detection.timestamp) <= timeLimit
+                );
+                
+                if (recentDetections.length === 0) return false;
+                
+                // Verificar si la nueva posición está cerca de detecciones recientes
+                const lastDetection = recentDetections[recentDetections.length - 1];
+                const distance = this.getDistancePixels({ x, y }, lastDetection);
+                
+                // Si está cerca y el movimiento es razonable, mantener continuidad
+                const maxDistance = 80; // Distancia máxima para mantener continuidad
+                const timeDiff = timestamp - lastDetection.timestamp;
+                const maxSpeed = 3; // píxeles por ms
+                
+                return distance <= maxDistance && (distance / Math.max(timeDiff, 1)) <= maxSpeed;
+            }
+
+            // FUNCIONES PARA SOPORTE MULTI-MANO
+
+            // Nueva función: Procesar dedo de una mano específica
+            processHandFinger(landmarks, handLabel, timestamp) {
+                const fingerConfig = CONFIG.fingerLandmarks[this.currentFinger];
+                const landmark = landmarks[fingerConfig.tip];
+                
+                // Verificar si el landmark de la punta es válido
+                if (this.isValidLandmark(landmark)) {
+                    // Convertir coordenadas (espejo)
+                    const x = (1 - landmark.x) * this.canvas.width;
+                    const y = landmark.y * this.canvas.height;
+                    
+                    // Verificar si el dedo está extendido O si tenemos continuidad temporal
+                    const isExtended = this.isFingerExtended(landmarks, this.currentFinger);
+                    const hasContinuity = this.hasTemporalContinuityForHand(handLabel, x, y, timestamp);
+                    
+                    if (isExtended || hasContinuity) {
+                        // Actualizar historial de detecciones para esta mano
+                        this.updateDetectionHistoryForHand(handLabel, { x, y, extended: isExtended }, timestamp);
+                        
+                        // Procesar el punto para esta mano
+                        this.processFingerPointForHand(handLabel, x, y, timestamp);
+                    } else {
+                        // No extendido y sin continuidad
+                        this.updateDetectionHistoryForHand(handLabel, null, timestamp);
+                    }
+                } else {
+                    // Landmark no válido
+                    this.updateDetectionHistoryForHand(handLabel, null, timestamp);
+                }
+            }
+
+            // Nueva función: Actualizar historial para una mano específica
+            updateDetectionHistoryForHand(handLabel, detection, timestamp) {
+                if (!this.detectionHistories.has(handLabel)) {
+                    this.detectionHistories.set(handLabel, []);
+                }
+                
+                const history = this.detectionHistories.get(handLabel);
+                
+                if (detection) {
+                    history.push({
+                        x: detection.x,
+                        y: detection.y,
+                        extended: detection.extended,
+                        timestamp: timestamp
+                    });
+                } else {
+                    // Agregar entrada nula para mantener el historial temporal
+                    history.push(null);
+                }
+                
+                // Mantener solo últimos 10 elementos (para performance)
+                if (history.length > 10) {
+                    history.shift();
+                }
+                
+                const timeLimit = 300;
+                const cleanHistory = history.filter(det => 
+                    !det || (timestamp - det.timestamp) <= timeLimit
+                );
+                
+                this.detectionHistories.set(handLabel, cleanHistory);
+            }
+
+            // Nueva función: Procesar punto del dedo para una mano específica
+            processFingerPointForHand(handLabel, x, y, timestamp) {
+                // Inicializar estructuras para esta mano si no existen
+                if (!this.trails.has(handLabel)) {
+                    this.trails.set(handLabel, []);
+                    this.particles.set(handLabel, []);
+                    this.stillCounters.set(handLabel, 0);
+                }
+                
+                const trail = this.trails.get(handLabel);
+                const lastPosition = this.lastFingerPositions.get(handLabel);
+                let stillCounter = this.stillCounters.get(handLabel);
+                
+                // Verificar si hay una posición anterior válida para esta mano
+                if (lastPosition) {
+                    // Calcular distancia del movimiento
+                    const distance = this.getDistancePixels({ x, y }, lastPosition);
+                    
+                    // Si el movimiento es muy grande, interpolar puntos intermedios
+                    if (distance > 25) { // Umbral para interpolación
+                        this.interpolateMovementForHand(handLabel, lastPosition, { x, y }, timestamp);
+                    } else if (distance > 3) { // Movimiento normal
+                        trail.push({ x, y, timestamp });
+                        stillCounter = 0;
+                    } else {
+                        // Movimiento mínimo - dedo quieto
+                        stillCounter++;
+                        
+                        // Crear chispas si está quieto por un tiempo
+                        if (stillCounter > 5) {
+                            this.createCandleFlamesForHand(handLabel, x, y, timestamp);
+                        }
+                    }
+                } else {
+                    // Primera detección del dedo para esta mano
+                    trail.length = 0;
+                    trail.push({ x, y, timestamp, isNewStart: true });
+                    stillCounter = 0;
+                }
+                
+                // Actualizar estado para esta mano
+                this.lastFingerPositions.set(handLabel, { x, y });
+                this.lastDetectionTimes.set(handLabel, timestamp);
+                this.stillCounters.set(handLabel, stillCounter);
+                
+                // Limitar puntos para mejor rendimiento
+                if (trail.length > CONFIG.trail.maxPoints) {
+                    trail.shift();
+                }
+            }
+
+            // Nueva función: Interpolar movimiento para una mano específica
+            interpolateMovementForHand(handLabel, start, end, timestamp) {
+                const trail = this.trails.get(handLabel);
+                const distance = this.getDistancePixels(start, end);
+                const steps = Math.min(Math.ceil(distance / 15), 5); // Máximo 5 puntos interpolados
+                
+                for (let i = 1; i <= steps; i++) {
+                    const ratio = i / steps;
+                    const interpolatedX = start.x + (end.x - start.x) * ratio;
+                    const interpolatedY = start.y + (end.y - start.y) * ratio;
+                    const interpolatedTime = timestamp - (steps - i) * 2; // Distribuir en el tiempo
+                    
+                    trail.push({ 
+                        x: interpolatedX, 
+                        y: interpolatedY, 
+                        timestamp: interpolatedTime,
+                        interpolated: true // Marcar como interpolado
+                    });
+                }
+                
+                this.stillCounters.set(handLabel, 0);
+            }
+
+            // Nueva función: Crear llamas para una mano específica
+            createCandleFlamesForHand(handLabel, x, y, timestamp) {
+                if (!this.particles.has(handLabel)) {
+                    this.particles.set(handLabel, []);
+                }
+                
+                const particles = this.particles.get(handLabel);
+                
+                // Crear 2-3 llamas grandes que suben desde el dedo
+                for (let i = 0; i < 3; i++) {
+                    particles.push({
+                        x: x + (Math.random() - 0.5) * 8,
+                        y: y - Math.random() * 5,
+                        vx: (Math.random() - 0.5) * 0.8,
+                        vy: -1.5 - Math.random() * 1.5,
+                        life: 1,
+                        decay: 0.015,
+                        size: 4 + Math.random() * 6,
+                        timestamp,
+                        flicker: Math.random() * Math.PI * 2
+                    });
+                }
+                
+                // Limitar partículas para rendimiento
+                if (particles.length > 30) {
+                    particles.splice(0, particles.length - 30);
+                }
+            }
+
+            // Nueva función: Crear llamas de vela grandes
+            createCandleFlames(x, y, timestamp) {
+                // Crear 2-3 llamas grandes que suben desde el dedo
+                for (let i = 0; i < 3; i++) {
+                    this.particles.push({
+                        x: x + (Math.random() - 0.5) * 8, // Menos dispersión horizontal
+                        y: y - Math.random() * 5, // Empezar ligeramente arriba del dedo
+                        vx: (Math.random() - 0.5) * 0.8, // Movimiento horizontal lento
+                        vy: -1.5 - Math.random() * 1.5, // Siempre hacia arriba
+                        life: 1,
+                        decay: 0.015, // Más lento para llamas más duraderas
+                        size: 4 + Math.random() * 6, // Tamaño de 4-10px (mucho más grande)
+                        timestamp,
+                        flicker: Math.random() * Math.PI * 2 // Para efecto de parpadeo
+                    });
+                }
+                
+                // Limitar partículas para rendimiento
+                if (this.particles.length > 30) {
+                    this.particles.splice(0, this.particles.length - 30);
+                }
+            }
+
+            // Función auxiliar para calcular distancia en píxeles
+            getDistancePixels(point1, point2) {
+                const dx = point1.x - point2.x;
+                const dy = point1.y - point2.y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            // Función mejorada: Detectar si un dedo está extendido (más tolerante)
+            isFingerExtended(landmarks, fingerName) {
+                const fingerConfig = CONFIG.fingerLandmarks[fingerName];
+                
+                if (!fingerConfig) return false;
+                
+                const tip = landmarks[fingerConfig.tip];
+                const joints = fingerConfig.joints.map(idx => landmarks[idx]);
+                const base = landmarks[fingerConfig.base];
+                const wrist = landmarks[0];
+                
+                // Verificar que todos los landmarks sean válidos
+                if (!this.isValidLandmark(tip) || !this.isValidLandmark(base) || !this.isValidLandmark(wrist)) {
+                    return false;
+                }
+                
+                // Verificar joints válidos
+                const validJoints = joints.filter(joint => this.isValidLandmark(joint));
+                if (validJoints.length === 0) return false;
+                
+                // Múltiples criterios de detección (más tolerante)
+                let extendedScore = 0;
+                const maxScore = 4; // Número de tests
+                
+                // Test 1: Distancia de la punta a la muñeca vs base a muñeca (más tolerante)
+                const tipToWrist = this.getDistance(tip, wrist);
+                const baseToWrist = this.getDistance(base, wrist);
+                if (tipToWrist > baseToWrist * 0.7) { // Reducido a 70% para mayor tolerancia
+                    extendedScore++;
+                }
+                
+                // Test 2: Progresión de las articulaciones (más tolerante)
+                let progressionValid = true;
+                for (let i = 0; i < validJoints.length - 1; i++) {
+                    const dist1 = this.getDistance(validJoints[i], wrist);
+                    const dist2 = this.getDistance(validJoints[i + 1], wrist);
+                    if (dist1 < dist2 * 0.6) { // Tolerancia aumentada al 60%
+                        progressionValid = false;
+                        break;
+                    }
+                }
+                if (progressionValid) {
+                    extendedScore++;
+                }
+                
+                // Test 3: Específico por tipo de dedo (más tolerante)
+                switch (fingerName) {
+                    case 'thumb':
+                        // Para pulgar: verificar ángulo con respecto a la palma
+                        const palmBase = landmarks[5]; // Base del índice como referencia
+                        if (this.isValidLandmark(palmBase)) {
+                            const thumbAngle = this.getAngle(wrist, palmBase, tip);
+                            if (thumbAngle > 10) { // Reducido de 15 a 10 grados
+                                extendedScore++;
+                            }
+                        }
+                        break;
+                        
+                    case 'index':
+                    case 'middle':
+                        // Para índice y medio: verificar altura relativa y dispersión (más tolerante)
+                        const firstJoint = validJoints[0];
+                        const lastJoint = validJoints[validJoints.length - 1];
+                        
+                        // Altura: más tolerancia en posición vertical
+                        if (tip.y <= Math.max(firstJoint.y, lastJoint.y) + 0.05) { // Aumentado de 0.03 a 0.05
+                            extendedScore++;
+                        }
+                        
+                        // Dispersión: el dedo extendido tiene mayor "longitud" (más tolerante)
+                        const fingerLength = this.getDistance(tip, base);
+                        const referenceLength = this.getDistance(landmarks[0], landmarks[9]); // Muñeca a base del medio
+                        if (fingerLength > referenceLength * 0.12) { // Reducido de 15% a 12%
+                            extendedScore++;
+                        }
+                        break;
+                }
+                
+                // Test 4: Visibilidad general (landmark confidence implícita)
+                // Si llegamos aquí con landmarks válidos, es buena señal
+                extendedScore++;
+                
+                // Considerar extendido si pasa al menos 1.5 de 4 tests (37.5% - más tolerante)
+                return extendedScore >= 1.5;
+            }
+
+            // Nueva función: Calcular ángulo entre tres puntos
+            getAngle(p1, p2, p3) {
+                const v1 = { x: p1.x - p2.x, y: p1.y - p2.y };
+                const v2 = { x: p3.x - p2.x, y: p3.y - p2.y };
+                
+                const dot = v1.x * v2.x + v1.y * v2.y;
+                const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
+                const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+                
+                if (mag1 === 0 || mag2 === 0) return 0;
+                
+                const cosAngle = dot / (mag1 * mag2);
+                const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
+                
+                return angle * (180 / Math.PI); // Convertir a grados
+            }
+
+            // Función auxiliar para calcular distancia entre dos puntos
+            getDistance(point1, point2) {
+                const dx = point1.x - point2.x;
+                const dy = point1.y - point2.y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            isValidLandmark(landmark) {
+                return landmark && 
+                       landmark.x >= 0 && landmark.x <= 1 && 
+                       landmark.y >= 0 && landmark.y <= 1;
+            }
+
+            cleanupOldPoints() {
+                const now = Date.now();
+                
+                // Limpiar rastro viejo
+                this.trail = this.trail.filter(point => 
+                    (now - point.timestamp) < this.trailDuration
+                );
+                
+                // Limpiar y actualizar partículas (llamas)
+                this.particles = this.particles.filter(particle => {
+                    particle.life -= particle.decay;
+                    particle.x += particle.vx;
+                    particle.y += particle.vy;
+                    
+                    // Efecto de vela: oscilación horizontal y subida
+                    particle.flicker += 0.3;
+                    particle.vx += Math.sin(particle.flicker) * 0.1; // Oscilación
+                    particle.vy *= 0.98; // Desaceleración gradual hacia arriba
+                    
+                    return particle.life > 0;
+                });
+            }
+
+            render() {
+                // Limpiar canvas
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                // Renderizar rastro
+                this.renderTrail();
+                
+                // Renderizar chispas
+                this.renderParticles();
+            }
+
+            renderTrail() {
+                if (this.trail.length < 2) return;
+                
+                const now = Date.now();
+                
+                // Configurar estilo
+                this.ctx.strokeStyle = this.currentColor;
+                this.ctx.lineWidth = CONFIG.trail.width;
+                
+                // Buscar segmentos continuos (sin saltos grandes)
+                let segments = [];
+                let currentSegment = [this.trail[0]];
+                
+                for (let i = 1; i < this.trail.length; i++) {
+                    const currentPoint = this.trail[i];
+                    const previousPoint = this.trail[i - 1];
+                    
+                    // Calcular distancia entre puntos consecutivos
+                    const distance = this.getDistancePixels(currentPoint, previousPoint);
+                    
+                    // Si la distancia es muy grande, iniciar nuevo segmento
+                    if (distance > 50 || currentPoint.isNewStart) {
+                        // Guardar segmento actual si tiene más de 1 punto
+                        if (currentSegment.length > 1) {
+                            segments.push(currentSegment);
+                        }
+                        // Iniciar nuevo segmento
+                        currentSegment = [currentPoint];
+                    } else {
+                        // Continuar segmento actual
+                        currentSegment.push(currentPoint);
+                    }
+                }
+                
+                // Agregar último segmento
+                if (currentSegment.length > 1) {
+                    segments.push(currentSegment);
+                }
+                
+                // Dibujar cada segmento por separado
+                segments.forEach(segment => {
+                    if (segment.length < 2) return;
+                    
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(segment[0].x, segment[0].y);
+                    
+                    for (let i = 1; i < segment.length; i++) {
+                        const point = segment[i];
+                        const age = now - point.timestamp;
+                        const opacity = Math.max(0.1, 1 - (age / this.trailDuration));
+                        
+                        this.ctx.globalAlpha = opacity;
+                        this.ctx.lineTo(point.x, point.y);
+                        this.ctx.stroke();
+                        
+                        // Nuevo path para siguiente segmento con diferente opacidad
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(point.x, point.y);
+                    }
+                });
+                
+                // Restaurar opacidad
+                this.ctx.globalAlpha = 1;
+            }
+
+            renderParticles() {
+                // Renderizar llamas de vela grandes
+                this.particles.forEach(particle => {
+                    this.ctx.save();
+                    
+                    // Opacidad base con efecto de parpadeo
+                    const flickerEffect = 0.8 + 0.2 * Math.sin(particle.flicker);
+                    this.ctx.globalAlpha = particle.life * flickerEffect;
+                    
+                    // Color de llama: gradiente del color base a amarillo/naranja
+                    const baseColor = this.hexToHsl(this.currentColor);
+                    const flameHue = Math.min(60, baseColor.h + 20); // Tiende hacia amarillo/naranja
+                    const flameSat = Math.min(100, baseColor.s + 20);
+                    const flameLit = Math.min(80, baseColor.l + 30);
+                    
+                    this.ctx.fillStyle = `hsl(${flameHue}, ${flameSat}%, ${flameLit}%)`;
+                    this.ctx.shadowColor = this.ctx.fillStyle;
+                    this.ctx.shadowBlur = 15 + particle.size; // Resplandor grande
+                    
+                    // Dibujar llama como círculo grande con resplandor
+                    this.ctx.beginPath();
+                    this.ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    
+                    // Núcleo más brillante
+                    this.ctx.shadowBlur = 5;
+                    this.ctx.fillStyle = `hsl(${flameHue}, 100%, 90%)`;
+                    this.ctx.beginPath();
+                    this.ctx.arc(particle.x, particle.y, particle.size * 0.4, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    
+                    this.ctx.restore();
+                });
+            }
+
+            // Función auxiliar para convertir hex a hsl
+            hexToHsl(hex) {
+                // Remover # si existe
+                hex = hex.replace('#', '');
+                
+                // Convertir a RGB
+                const r = parseInt(hex.substr(0, 2), 16) / 255;
+                const g = parseInt(hex.substr(2, 2), 16) / 255;
+                const b = parseInt(hex.substr(4, 2), 16) / 255;
+                
+                const max = Math.max(r, g, b);
+                const min = Math.min(r, g, b);
+                let h, s, l = (max + min) / 2;
+                
+                if (max === min) {
+                    h = s = 0;
+                } else {
+                    const d = max - min;
+                    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                    switch (max) {
+                        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                        case g: h = (b - r) / d + 2; break;
+                        case b: h = (r - g) / d + 4; break;
+                    }
+                    h /= 6;
+                }
+                
+                return {
+                    h: Math.round(h * 360),
+                    s: Math.round(s * 100),
+                    l: Math.round(l * 100)
+                };
+            }
+
+            startRenderLoop() {
+                const animate = () => {
+                    this.cleanupOldPoints();
+                    this.render();
+                    requestAnimationFrame(animate);
+                };
+                animate();
+            }
+        }
+
+        // ===== INICIALIZAR =====
+        window.addEventListener('load', () => {
+            new OptimizedTrailApp();
+        });
+    </script>
+</body>
+</html>
+
+            async init() {
+                try {
+                    await this.setupCamera();
+                    this.setupCanvas();
+                    await this.setupHandDetection();
+                    this.setupControls();
+                    this.startAnimation();
+                    this.loading.style.display = 'none';
+                } catch (error) {
+                    console.error('Error al inicializar:', error);
+                    this.loading.textContent = 'Error al acceder a la cámara o cargar la detección de manos';
+                }
+            }
+
+            async setupCamera() {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    }
+                });
+                this.video.srcObject = stream;
+                
+                return new Promise((resolve) => {
+                    this.video.onloadedmetadata = () => {
+                        resolve();
+                    };
+                });
+            }
+
+            setupCanvas() {
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+                
+                this.video.style.transform = 'scaleX(-1)';
+                
+                window.addEventListener('resize', () => {
+                    this.canvas.width = window.innerWidth;
+                    this.canvas.height = window.innerHeight;
+                });
+            }
+
+            setupControls() {
+                const fingerButtons = {
+                    fingerIndex: 'index',
+                    fingerMiddle: 'middle', 
+                    fingerThumb: 'thumb',
+                    fingerAll: 'all'
+                };
+
+                Object.entries(fingerButtons).forEach(([buttonId, mode]) => {
+                    const btn = document.getElementById(buttonId);
+                    btn.addEventListener('click', () => {
+                        // Desactivar todos los botones de dedos
+                        Object.keys(fingerButtons).forEach(id => {
+                            document.getElementById(id).classList.remove('active');
+                        });
+                        // Activar el botón seleccionado
+                        btn.classList.add('active');
+                        this.settings.fingerMode = mode;
+                        
+                        // Limpiar buffers de suavizado al cambiar de dedo
+                        this.smoothingBuffer = {};
+                        this.lastValidDetection = {};
+                        
+                        // Limpiar también los rastros de todas las manos
+                        this.handTrails = {};
+                        this.handParticles = {};
+                        this.trails = [];
+                        this.particles = [];
+                    });
+                });
+
+                const mirrorBtn = document.getElementById('mirrorBtn');
+                mirrorBtn.addEventListener('click', () => {
+                    this.settings.mirror = !this.settings.mirror;
+                    mirrorBtn.classList.toggle('active');
+                    this.video.style.transform = this.settings.mirror ? 'scaleX(-1)' : 'scaleX(1)';
+                });
+
+                const particlesBtn = document.getElementById('particlesBtn');
+                particlesBtn.addEventListener('click', () => {
+                    this.settings.particles = !this.settings.particles;
+                    particlesBtn.classList.toggle('active');
+                });
+
+                const glowBtn = document.getElementById('glowBtn');
+                glowBtn.addEventListener('click', () => {
+                    this.settings.glow = !this.settings.glow;
+                    glowBtn.classList.toggle('active');
+                });
+
+                const trailWidth = document.getElementById('trailWidth');
+                const trailWidthValue = document.getElementById('trailWidthValue');
+                trailWidth.addEventListener('input', (e) => {
+                    this.settings.trailWidth = parseInt(e.target.value);
+                    trailWidthValue.textContent = `${this.settings.trailWidth}px`;
+                });
+
+                const trailDuration = document.getElementById('trailDuration');
+                const trailDurationValue = document.getElementById('trailDurationValue');
+                trailDuration.addEventListener('input', (e) => {
+                    this.settings.trailDuration = parseInt(e.target.value) * 1000;
+                    trailDurationValue.textContent = `${parseInt(e.target.value)}s`;
+                });
+
+                const particleIntensity = document.getElementById('particleIntensity');
+                const particleIntensityValue = document.getElementById('particleIntensityValue');
+                particleIntensity.addEventListener('input', (e) => {
+                    this.settings.particleIntensity = parseInt(e.target.value);
+                    particleIntensityValue.textContent = this.settings.particleIntensity;
+                });
+
+                const colorMode = document.getElementById('colorMode');
+                colorMode.addEventListener('click', () => {
+                    const modes = ['Arcoíris', 'Azul', 'Rosa', 'Dorado'];
+                    const modeValues = ['rainbow', 'blue', 'pink', 'gold'];
+                    let currentIndex = modeValues.indexOf(this.settings.colorMode);
+                    currentIndex = (currentIndex + 1) % modes.length;
+                    this.settings.colorMode = modeValues[currentIndex];
+                    colorMode.textContent = modes[currentIndex];
+                });
+
+                const clearBtn = document.getElementById('clearBtn');
+                clearBtn.addEventListener('click', () => {
+                    this.trails = [];
+                    this.particles = [];
+                    this.handTrails = {};
+                    this.handParticles = {};
+                    this.smoothingBuffer = {};
+                    this.lastValidDetection = {};
+                });
+            }
+
+            async setupHandDetection() {
+                this.hands = new Hands({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                    }
+                });
+
+                this.hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 0, // Reducido al mínimo para máximo rendimiento
+                    minDetectionConfidence: 0.7,
+                    minTrackingConfidence: 0.5
+                });
+
+                this.hands.onResults((results) => this.onHandResults(results));
+
+                this.camera = new Camera(this.video, {
+                    onFrame: async () => {
+                        await this.hands.send({ image: this.video });
+                    },
+                    width: 640, // Aumentado para mejor detección
+                    height: 480
+                });
+
+                await this.camera.start();
+            }
+
+            onHandResults(results) {
+                // Optimización más agresiva: limitar frecuencia de procesamiento
+                const now = performance.now();
+                if (now - this.lastFrameTime < this.frameInterval) {
+                    return;
+                }
+                this.lastFrameTime = now;
+
+                // Procesar solo si hay cambios significativos
+                if (results.multiHandLandmarks && results.multiHandedness) {
+                    this.processResults(results);
+                }
+            }
+
+            processResults(results) {
+                // Usar Set más eficiente para detecciones
+                const currentDetections = new Set();
+
+                // Procesar de forma más eficiente
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    const handedness = results.multiHandedness[i];
+                    const handLabel = handedness.label;
+                    
+                    this.processHandLandmarksOptimized(landmarks, handLabel, currentDetections);
+                }
+
+                // Cleanup más eficiente
+                this.cleanupUndetectedHandsOptimized(currentDetections);
+            }
+
+            processHandLandmarksOptimized(landmarks, handLabel, currentDetections) {
+                const now = Date.now();
+                
+                // Solo procesar dedos relevantes según configuración
+                const fingerToProcess = this.getFingerToProcess();
+                if (!fingerToProcess) return;
+
+                fingerToProcess.forEach(fingerInfo => {
+                    const fingerTip = landmarks[fingerInfo.landmark];
+                    const handFingerKey = `${handLabel}_${fingerInfo.name}`;
+                    
+                    currentDetections.add(handFingerKey);
+                    
+                    // Verificación más rápida de validez
+                    if (this.isValidFingerTip(fingerTip)) {
+                        const coords = this.convertCoordinates(fingerTip);
+                        const smoothedPoint = this.smoothPointOptimized(coords.x, coords.y, handFingerKey);
+                        
+                        if (smoothedPoint && this.shouldAddPoint(smoothedPoint, handFingerKey)) {
+                            this.addTrailPointOptimized(smoothedPoint.x, smoothedPoint.y, handFingerKey);
+                            this.lastValidDetection[handFingerKey] = now;
+                        }
+                    }
+                });
+            }
+
+            getFingerToProcess() {
+                switch (this.settings.fingerMode) {
+                    case 'index': return [{ landmark: 8, name: 'index' }];
+                    case 'middle': return [{ landmark: 12, name: 'middle' }];
+                    case 'thumb': return [{ landmark: 4, name: 'thumb' }];
+                    case 'all': return [
+                        { landmark: 4, name: 'thumb' },
+                        { landmark: 8, name: 'index' },
+                        { landmark: 12, name: 'middle' },
+                        { landmark: 16, name: 'ring' },
+                        { landmark: 20, name: 'pinky' }
+                    ];
+                    default: return null;
+                }
+            }
+
+            isValidFingerTip(fingerTip) {
+                return fingerTip && 
+                       fingerTip.x >= 0 && fingerTip.x <= 1 && 
+                       fingerTip.y >= 0 && fingerTip.y <= 1 && 
+                       (fingerTip.visibility || 1) > 0.5;
+            }
+
+            convertCoordinates(fingerTip) {
+                if (this.settings.mirror) {
+                    return {
+                        x: (1 - fingerTip.x) * this.canvas.width,
+                        y: fingerTip.y * this.canvas.height
+                    };
+                } else {
+                    return {
+                        x: fingerTip.x * this.canvas.width,
+                        y: fingerTip.y * this.canvas.height
+                    };
+                }
+            }
+
+            shouldAddPoint(point, handFingerKey) {
+                const trails = this.handTrails[handFingerKey];
+                if (!trails || trails.length === 0) return true;
+                
+                const lastPoint = trails[trails.length - 1];
+                const distance = Math.sqrt(
+                    Math.pow(point.x - lastPoint.x, 2) + 
+                    Math.pow(point.y - lastPoint.y, 2)
+                );
+                return distance >= 1; // Muy permisivo para máxima fluidez
+            }
+
+            cleanupUndetectedHandsOptimized(currentDetections) {
+                const now = Date.now();
+                
+                // Cleanup más eficiente
+                Object.keys(this.lastValidDetection).forEach(handFingerKey => {
+                    if (!currentDetections.has(handFingerKey) &&
+                        (now - this.lastValidDetection[handFingerKey]) > this.detectionTimeout) {
+                        
+                        // Limpiar buffers
+                        if (this.smoothingBuffer[handFingerKey]) {
+                            const buffer = this.smoothingBuffer[handFingerKey];
+                            buffer.forEach(point => this.returnPointToPool(point));
+                            delete this.smoothingBuffer[handFingerKey];
+                        }
+                        
+                        delete this.lastValidDetection[handFingerKey];
+                    }
+                });
+            }
+
+            smoothPointOptimized(x, y, handFingerKey) {
+                // Inicializar buffer para esta mano/dedo si no existe
+                if (!this.smoothingBuffer[handFingerKey]) {
+                    this.smoothingBuffer[handFingerKey] = [];
+                }
+                
+                const buffer = this.smoothingBuffer[handFingerKey];
+                
+                // Reutilizar objetos del pool
+                let point = this.getPointFromPool();
+                point.x = x;
+                point.y = y;
+                point.timestamp = Date.now();
+                
+                buffer.push(point);
+                
+                // Mantener solo los últimos N puntos
+                if (buffer.length > this.smoothingWindow) {
+                    const oldPoint = buffer.shift();
+                    this.returnPointToPool(oldPoint);
+                }
+                
+                // Suavizado más simple y rápido
+                if (buffer.length < 2) {
+                    return { x, y };
+                }
+                
+                // Promedio simple en lugar de ponderado para mejor rendimiento
+                let sumX = 0, sumY = 0;
+                buffer.forEach(p => {
+                    sumX += p.x;
+                    sumY += p.y;
+                });
+                
+                return {
+                    x: sumX / buffer.length,
+                    y: sumY / buffer.length
+                };
+            }
+
+            getPointFromPool() {
+                return this.pointPool.pop() || { x: 0, y: 0, timestamp: 0 };
+            }
+
+            returnPointToPool(point) {
+                if (this.pointPool.length < this.maxPoolSize) {
+                    this.pointPool.push(point);
+                }
+            }
+
+            getParticleFromPool() {
+                return this.particlePool.pop() || {
+                    x: 0, y: 0, vx: 0, vy: 0, life: 1, decay: 0,
+                    size: 0, hue: 0, pulseSpeed: 0, handFingerKey: ''
+                };
+            }
+
+            returnParticleToPool(particle) {
+                if (this.particlePool.length < this.maxPoolSize) {
+                    this.particlePool.push(particle);
+                }
+            }
+
+            addTrailPointOptimized(x, y, handFingerKey) {
+                const now = Date.now();
+                
+                // Inicializar arrays para esta mano/dedo si no existen
+                if (!this.handTrails[handFingerKey]) {
+                    this.handTrails[handFingerKey] = [];
+                }
+                if (!this.handParticles[handFingerKey]) {
+                    this.handParticles[handFingerKey] = [];
+                }
+                
+                const trails = this.handTrails[handFingerKey];
+                const particles = this.handParticles[handFingerKey];
+                
+                // Agregar nuevo punto al rastro
+                trails.push({
+                    x: x,
+                    y: y,
+                    timestamp: now,
+                    handFingerKey: handFingerKey
+                });
+
+                // Crear partículas si están habilitadas
+                if (this.settings.particles) {
+                    const particleCount = Math.min(this.settings.particleIntensity, 3);
+                    for (let i = 0; i < particleCount; i++) {
+                        const particle = this.getParticleFromPool();
+                        particle.x = x + (Math.random() - 0.5) * 20;
+                        particle.y = y + (Math.random() - 0.5) * 20;
+                        particle.vx = (Math.random() - 0.5) * 3;
+                        particle.vy = (Math.random() - 0.5) * 3;
+                        particle.life = 1;
+                        particle.decay = 0.03 + Math.random() * 0.02;
+                        particle.size = 1 + Math.random() * 2;
+                        particle.hue = this.getParticleColor();
+                        particle.handFingerKey = handFingerKey;
+                        particles.push(particle);
+                    }
+                }
+
+                // Limpieza moderada para mantener rendimiento
+                const maxTrailPoints = 500; // Aumentado un poco
+                if (trails.length > maxTrailPoints) {
+                    trails.splice(0, trails.length - maxTrailPoints);
+                }
+
+                // Filtrar puntos antiguos de manera más eficiente
+                const cutoffTime = now - this.settings.trailDuration;
+                let firstValidIndex = 0;
+                for (let i = 0; i < trails.length; i++) {
+                    if (trails[i].timestamp >= cutoffTime) {
+                        firstValidIndex = i;
+                        break;
+                    }
+                }
+                if (firstValidIndex > 0) {
+                    trails.splice(0, firstValidIndex);
+                }
+                
+                // Limpieza de partículas
+                const maxParticles = 200; // Aumentado un poco
+                if (particles.length > maxParticles) {
+                    const oldParticles = particles.splice(0, particles.length - maxParticles);
+                    oldParticles.forEach(p => this.returnParticleToPool(p));
+                }
+            }
+
+            getAllTrails() {
+                // Función simplificada - ya no necesaria con renderizado optimizado
+                return [];
+            }
+
+            getAllParticles() {
+                // Función simplificada - ya no necesaria con renderizado optimizado  
+                return [];
+            }
+
+            getParticleColor() {
+                switch (this.settings.colorMode) {
+                    case 'blue': return 180 + Math.random() * 60;
+                    case 'pink': return 300 + Math.random() * 60;
+                    case 'gold': return 45 + Math.random() * 30;
+                    default: return Math.random() * 360; // rainbow
+                }
+            }
+
+            getTrailColor(age, opacity) {
+                let hue1, hue2;
+                
+                switch (this.settings.colorMode) {
+                    case 'blue':
+                        hue1 = 180;
+                        hue2 = 240;
+                        break;
+                    case 'pink':
+                        hue1 = 300;
+                        hue2 = 340;
+                        break;
+                    case 'gold':
+                        hue1 = 45;
+                        hue2 = 60;
+                        break;
+                    default: // rainbow
+                        hue1 = (age / 50) % 360;
+                        hue2 = (hue1 + 60) % 360;
+                        break;
+                }
+                
+                return {
+                    color1: `hsla(${hue1}, 80%, 60%, ${opacity * 0.8})`,
+                    color2: `hsla(${hue2}, 80%, 70%, ${opacity})`
+                };
+            }
+
+            updateParticles() {
+                // Actualización más eficiente de partículas
+                Object.values(this.handParticles).forEach(particles => {
+                    for (let i = particles.length - 1; i >= 0; i--) {
+                        const particle = particles[i];
+                        particle.x += particle.vx;
+                        particle.y += particle.vy;
+                        particle.life -= particle.decay;
+                        particle.vy += 0.03; // Gravedad reducida
+                        particle.vx *= 0.98; // Resistencia del aire
+                        
+                        if (particle.life <= 0) {
+                            this.returnParticleToPool(particle);
+                            particles.splice(i, 1);
+                        }
+                    }
+                });
+            }
+
+            draw() {
+                const now = performance.now();
+                
+                // Limitar FPS de renderizado independientemente de la detección
+                if (now - this.lastRenderTime < this.renderInterval) {
+                    return;
+                }
+                this.lastRenderTime = now;
+
+                // Limpiar canvas de manera eficiente
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // Renderizar rastros optimizado pero funcional
+                this.ctx.globalCompositeOperation = 'screen';
+                this.ctx.lineWidth = this.settings.trailWidth;
+                this.ctx.lineCap = 'round';
+                this.ctx.lineJoin = 'round';
+
+                // Dibujar rastros para cada mano/dedo
+                Object.entries(this.handTrails).forEach(([handFingerKey, trails]) => {
+                    if (trails.length > 1) {
+                        this.drawTrailOptimized(trails, handFingerKey);
+                    }
+                });
+
+                // Dibujar partículas de forma más simple
+                if (this.settings.particles) {
+                    this.drawParticlesOptimized();
+                }
+
+                this.ctx.globalCompositeOperation = 'source-over';
+                this.ctx.shadowBlur = 0;
+            }
+
+            drawTrailOptimized(trails, handFingerKey) {
+                const now = Date.now();
+                const colorOffset = this.getHandColorOffset(handFingerKey);
+                
+                // Filtrar puntos válidos por tiempo
+                const validTrails = trails.filter(point => {
+                    const age = now - point.timestamp;
+                    return age < this.settings.trailDuration;
+                });
+                
+                if (validTrails.length < 2) return;
+                
+                // Color simple pero visible
+                const baseHue = this.settings.colorMode === 'rainbow' ? 
+                    (Date.now() / 50) % 360 : 
+                    this.getBaseHue();
+                    
+                const hue = (baseHue + colorOffset) % 360;
+                
+                // Dibujar con opacidad variable según la edad
+                this.ctx.beginPath();
+                this.ctx.moveTo(validTrails[0].x, validTrails[0].y);
+                
+                for (let i = 1; i < validTrails.length; i++) {
+                    const point = validTrails[i];
+                    const age = now - point.timestamp;
+                    const opacity = Math.max(0.1, 1 - (age / this.settings.trailDuration));
+                    
+                    // Cambiar estilo para cada segmento
+                    this.ctx.strokeStyle = `hsla(${hue}, 80%, 60%, ${opacity})`;
+                    
+                    if (this.settings.glow) {
+                        this.ctx.shadowColor = this.ctx.strokeStyle;
+                        this.ctx.shadowBlur = 10;
+                    } else {
+                        this.ctx.shadowBlur = 0;
+                    }
+                    
+                    this.ctx.lineTo(point.x, point.y);
+                    this.ctx.stroke();
+                    
+                    // Comenzar nuevo segmento
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(point.x, point.y);
+                }
+            }
+
+            drawParticlesOptimized() {
+                this.ctx.shadowBlur = 0;
+                
+                Object.entries(this.handParticles).forEach(([handFingerKey, particles]) => {
+                    const colorOffset = this.getHandColorOffset(handFingerKey);
+                    
+                    particles.forEach(particle => {
+                        if (particle.life <= 0.1) return;
+                        
+                        this.ctx.save();
+                        this.ctx.globalAlpha = particle.life;
+                        const hue = (particle.hue + colorOffset) % 360;
+                        this.ctx.fillStyle = `hsl(${hue}, 80%, 70%)`;
+                        
+                        if (this.settings.glow) {
+                            this.ctx.shadowColor = this.ctx.fillStyle;
+                            this.ctx.shadowBlur = 5;
+                        }
+                        
+                        this.ctx.beginPath();
+                        this.ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+                        this.ctx.fill();
+                        this.ctx.restore();
+                    });
+                });
+            }
+
+            getBaseHue() {
+                switch (this.settings.colorMode) {
+                    case 'blue': return 180;
+                    case 'pink': return 300;
+                    case 'gold': return 45;
+                    default: return 200;
+                }
+            }
+
+            draw() {
+                // Limpiar canvas de manera eficiente
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                const now = Date.now();
+
+                // Dibujar rastros separados por mano/dedo
+                Object.entries(this.handTrails).forEach(([handFingerKey, trails]) => {
+                    if (trails.length > 2) {
+                        this.drawHandTrail(trails, handFingerKey, now);
+                    }
+                });
+
+                // Dibujar partículas chispeantes agrupadas por mano/dedo
+                Object.entries(this.handParticles).forEach(([handFingerKey, particles]) => {
+                    if (particles.length > 0) {
+                        this.drawHandParticles(particles, handFingerKey);
+                    }
+                });
+
+                this.ctx.globalCompositeOperation = 'source-over';
+                this.ctx.shadowBlur = 0;
+            }
+
+
+
+            getHandColorOffset(handFingerKey) {
+                // Asignar diferentes offsets de color para diferentes manos/dedos
+                const colorOffsets = {
+                    'Left_index': 0,
+                    'Right_index': 60,
+                    'Left_middle': 120,
+                    'Right_middle': 180,
+                    'Left_thumb': 240,
+                    'Right_thumb': 300,
+                    'Left_ring': 30,
+                    'Right_ring': 90,
+                    'Left_pinky': 150,
+                    'Right_pinky': 210
+                };
+                
+                return colorOffsets[handFingerKey] || 0;
+            }
+
+            getTrailColorForHand(age, opacity, handFingerKey) {
+                // Función simplificada para mejor rendimiento
+                const colorOffset = this.getHandColorOffset(handFingerKey);
+                const baseHue = this.getBaseHue();
+                const hue = (baseHue + colorOffset) % 360;
+                
+                return {
+                    color1: `hsla(${hue}, 80%, 60%, ${opacity * 0.8})`,
+                    color2: `hsla(${(hue + 30) % 360}, 80%, 70%, ${opacity})`
+                };
+            }
+
+            startAnimation() {
+                // Loop de animación optimizado con requestAnimationFrame más eficiente
+                let lastUpdateTime = 0;
+                const updateInterval = 16; // ~60fps para updates de partículas
+                
+                const animate = (currentTime) => {
+                    // Separar updates de partículas del renderizado
+                    if (currentTime - lastUpdateTime >= updateInterval) {
+                        this.updateParticles();
+                        lastUpdateTime = currentTime;
+                    }
+                    
+                    // El renderizado tiene su propio throttling interno
+                    this.draw();
+                    
+                    requestAnimationFrame(animate);
+                };
+                
+                requestAnimationFrame(animate);
+            }
+        }
+        // Inicializar la aplicación cuando la página esté lista
+        window.addEventListener('load', () => {
+            new SparklyTrail();
+        });
+
+        // Manejar errores de permisos
+        window.addEventListener('error', (e) => {
+            console.error('Error:', e);
+        });
+    </script>
+</body>
+</html>
